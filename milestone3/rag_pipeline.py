@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
-from langchain_openai import ChatOpenAI
+
 
 import pandas as pd
 import numpy as np
@@ -40,7 +40,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 print("Google key loaded:", GOOGLE_API_KEY is not None)
 print("Groq key loaded:", GROQ_API_KEY is not None)
-print("OpenRouter key loaded:", OPENROUTER_API_KEY is not None)
+
 
 # ==========================================
 # LOAD FILE LISTS
@@ -593,27 +593,7 @@ groq_llm = ChatGroq(
 
 print("Groq model initialized successfully.")
 
-# ==========================================
-# INITIALIZE OPENROUTER MODEL
-# ==========================================
 
-openrouter_llm = None
-
-openrouter_llm = None
-
-if OPENROUTER_API_KEY:
-    openrouter_llm = ChatOpenAI(
-        model="meta-llama/llama-3.3-70b-instruct:free",
-        api_key=OPENROUTER_API_KEY,
-        base_url="https://openrouter.ai/api/v1",
-        temperature=0.3,
-        max_tokens=700
-    )
-
-    print("OpenRouter model initialized successfully.")
-
-else:
-    print("OpenRouter key not found. Skipping OpenRouter initialization.")
 
 
 
@@ -720,30 +700,6 @@ def generate_answer(query, top_k=5):
 
         except Exception as groq_error:
 
-            # ==========================================
-            # FALLBACK TO OPENROUTER
-            # ==========================================
-
-            try:
-                if openrouter_llm is None:
-                    raise ValueError("OpenRouter model is not initialized.")
-
-                response = call_llm_with_retry(
-                    openrouter_llm,
-                    prompt
-                )
-
-                return {
-                    "query": query,
-                    "response": response.content,
-                    "retrieved_chunks": retrieved_chunks,
-                    "context": context,
-                    "status": "success",
-                    "model_used": "openrouter-llama-3.3-70b"
-                }
-
-            except Exception as openrouter_error:
-
                 return {
                     "query": query,
                     "response": (
@@ -757,7 +713,7 @@ def generate_answer(query, top_k=5):
                     "error_message": (
                         f"Gemini error: {gemini_error} | "
                         f"Groq error: {groq_error} | "
-                        f"OpenRouter error: {openrouter_error}"
+                    
                     )
                 }
             
@@ -942,7 +898,7 @@ def chat_with_memory(query, top_k=5, max_turns=3, memory_strategy="sliding_windo
     )
 
     # ==========================================
-    # TRY GEMINI → GROQ → OPENROUTER
+    # TRY GEMINI → GROQ 
     # ==========================================
 
     try:
@@ -962,26 +918,18 @@ def chat_with_memory(query, top_k=5, max_turns=3, memory_strategy="sliding_windo
             model_used = "llama-3.3-70b-versatile"
 
         except Exception:
-
-            if openrouter_llm is None:
-                return {
-                    "query": query,
-                    "response": (
-                        "حدث خطأ أثناء استدعاء نماذج اللغة. "
-                        "يرجى المحاولة لاحقًا."
-                    ),
-                    "retrieved_chunks": retrieved_chunks,
-                    "context": context,
-                    "chat_history": chat_history,
-                    "status": "error",
-                    "model_used": None
-                }
-
-            response = call_llm_with_retry(
-                openrouter_llm,
-                prompt
-            )
-            model_used = "openrouter-llama-3.3-70b"
+            return {
+                "query": query,
+                "response": (
+                    "حدث خطأ أثناء استدعاء نماذج اللغة. "
+                    "يرجى المحاولة لاحقًا."
+                ),
+                "retrieved_chunks": retrieved_chunks,
+                "context": context,
+                "chat_history": chat_history,
+                "status": "error",
+                "model_used": None
+            }
 
     answer = response.content
 
