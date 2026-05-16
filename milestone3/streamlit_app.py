@@ -30,13 +30,25 @@ if "evaluation_logs" not in st.session_state:
 # SIDEBAR SETTINGS
 # ==========================================
 
-st.sidebar.header("Settings")
+st.sidebar.header("Configuration Experiments")
 
-top_k = st.sidebar.slider(
-    "Top-K Retrieved Chunks",
-    min_value=1,
-    max_value=8,
-    value=5
+model_choice = st.sidebar.selectbox(
+    "LLM Provider Engine",
+    ["gemini", "groq"],
+    index=0,
+    help="Select the primary LLM to generate answers."
+)
+
+prompt_style = st.sidebar.selectbox(
+    "Prompt Strategy",
+    [
+        "system_guided_ar",
+        "minimal_ar",
+        "system_guided_en",
+        "minimal_en"
+    ],
+    index=0,
+    help="Choose the instruction style and language for the system prompt."
 )
 
 memory_strategy = st.sidebar.selectbox(
@@ -46,7 +58,19 @@ memory_strategy = st.sidebar.selectbox(
         "full_history",
         "strict_truncation",
         "summarized_history"
-    ]
+    ],
+    index=0,
+    help="Define how the conversation history is managed in the context window."
+)
+
+st.sidebar.divider()
+st.sidebar.header("Hyperparameters")
+
+top_k = st.sidebar.slider(
+    "Top-K Retrieved Chunks",
+    min_value=1,
+    max_value=8,
+    value=5
 )
 
 max_turns = st.sidebar.slider(
@@ -57,7 +81,7 @@ max_turns = st.sidebar.slider(
 )
 
 show_logs = st.sidebar.checkbox(
-    "Show Retrieval Logs",
+    "Show Developer Visibility Logs",
     value=True
 )
 
@@ -93,7 +117,9 @@ if user_query:
                 user_query,
                 top_k=top_k,
                 max_turns=max_turns,
-                memory_strategy=memory_strategy
+                memory_strategy=memory_strategy,
+                model_choice=model_choice,
+                prompt_style=prompt_style
             )
 
             answer = result["response"]
@@ -105,35 +131,44 @@ if user_query:
                 "content": answer
             })
 
+            # Track metrics for the session log
             st.session_state.evaluation_logs.append({
                 "query": result["query"],
                 "response": result["response"],
                 "model_used": result.get("model_used"),
                 "status": result.get("status", "success"),
+                "prompt_style": prompt_style,
                 "memory_strategy": memory_strategy,
-                "top_k": top_k
+                "latency": f"{result.get('latency', 0):.2f}s",
+                "est_tokens": result.get("estimated_tokens", 0)
             })
 
             if show_logs:
 
-                with st.expander("Retrieved Context / Logs"):
+                with st.expander("Developer Visibility Logs"):
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Model Used", result.get("model_used", "N/A"))
+                    with col2:
+                        st.metric("Latency", f"{result.get('latency', 0):.2f}s")
+                    with col3:
+                        st.metric("Est. Tokens", result.get("estimated_tokens", 0))
 
-                    st.write("Model used:", result.get("model_used"))
-                    st.write("Status:", result.get("status", "success"))
-                    st.write("Memory strategy:", memory_strategy)
-
+                    st.write("---")
+                    
+                    status = result.get("status", "success")
+                    if status == "out_of_domain":
+                        st.warning("⚠️ Query detected as Out-of-Domain (OOD)")
+                    
                     retrieved_chunks = result.get("retrieved_chunks", [])
+                    if retrieved_chunks:
+                        best_score = retrieved_chunks[0].get("final_score", 0)
+                        st.write(f"**Top Retrieval Score (OOD Confidence):** {best_score:.4f}")
 
                     for i, chunk in enumerate(retrieved_chunks, start=1):
-                        st.markdown(f"### Source {i}")
-                        st.write("Episode:", chunk["episode"])
-                        st.write(
-                            "Time:",
-                            chunk["start_timestamp"],
-                            "→",
-                            chunk["end_timestamp"]
-                        )
-                        st.write("Final score:", round(chunk["final_score"], 4))
+                        st.markdown(f"#### Source {i} (Score: {chunk['final_score']:.4f})")
+                        st.caption(f"Episode: {chunk['episode']} | Time: {chunk['start_timestamp']} - {chunk['end_timestamp']}")
                         st.write(chunk["chunk_text"])
 
 # ==========================================
@@ -142,7 +177,7 @@ if user_query:
 
 st.divider()
 
-st.subheader("Session Logs")
+st.subheader("Engineering Performance Logs")
 
 if st.session_state.evaluation_logs:
     logs_df = pd.DataFrame(st.session_state.evaluation_logs)
@@ -151,10 +186,10 @@ if st.session_state.evaluation_logs:
     csv = logs_df.to_csv(index=False).encode("utf-8-sig")
 
     st.download_button(
-        label="Download session logs as CSV",
+        label="Download engineering logs as CSV",
         data=csv,
-        file_name="streamlit_session_logs.csv",
+        file_name="rag_performance_logs.csv",
         mime="text/csv"
     )
 else:
-    st.info("No logs yet. Start chatting to generate logs.")
+    st.info("No logs yet. Start chatting to generate performance data.")

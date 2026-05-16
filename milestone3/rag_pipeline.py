@@ -19,6 +19,7 @@ import faiss
 import json
 import re
 import os
+import time
 
 
 # ==========================================
@@ -37,6 +38,7 @@ QA_DIR = DATA_DIR / "QA"
 # ==========================================
 
 load_dotenv(BASE_DIR.parent / ".env", override=True)
+load_dotenv(BASE_DIR / ".env", override=True)
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -265,11 +267,11 @@ print(transcripts_df["normalized_text"].iloc[0])
 # CHUNKING STRATEGY
 # ==========================================
 
-CHUNK_SIZE = 12
-CHUNK_OVERLAP = 3
+CHUNK_SIZE = 24
+CHUNK_OVERLAP = 8
 MIN_WORDS = 20
 
-def create_chunks(transcripts_df, chunk_size=12, chunk_overlap=3, min_words=20):
+def create_chunks(transcripts_df, chunk_size=24, chunk_overlap=8, min_words=20):
     """
     Creates overlapping chunks from transcript lines.
 
@@ -522,6 +524,11 @@ def build_context(retrieved_chunks):
 # OUT-OF-DOMAIN DETECTION
 # ==========================================
 
+# Justification for OOD_THRESHOLD = 0.25:
+# This threshold is based on empirical testing of the FAISS FlatIP score (cosine similarity)
+# and keyword overlap. A score below 0.25 typically indicates that the retrieved chunks 
+# share very few keywords and have low semantic similarity with the query, suggesting 
+# the query is outside the knowledge base of the provided transcripts.
 OOD_THRESHOLD = 0.25
 
 def is_out_of_domain(retrieved_chunks, threshold=OOD_THRESHOLD):
@@ -547,14 +554,12 @@ def is_out_of_domain(retrieved_chunks, threshold=OOD_THRESHOLD):
 SYSTEM_PROMPT = """
 أنت مساعد ذكي يعتمد فقط على المعلومات الموجودة في السياق المسترجع.
 
-قواعد مهمة:
-- أجب باستخدام المعلومات الموجودة في السياق فقط.
-- يمكنك إعادة صياغة وشرح المعلومات الموجودة بوضوح.
-- لا تضف أي معلومات غير موجودة في السياق.
-- إذا كان السياق لا يحتوي على معلومات كافية فعلًا، قل:
-"لا أملك معلومات كافية للإجابة من البيانات المتاحة."
-- يمكنك الإجابة بالعربية أو الإنجليزية حسب لغة السؤال.
-- حاول أن تكون الإجابة واضحة ومختصرة.
+قواعد صارمة:
+1. أجب باستخدام المعلومات الموجودة في السياق فقط.
+2. لا تضف أي معلومات خارجية أو افتراضات.
+3. كن موجزًا جدًا في إجابتك (جملة واحدة أو جملتين كحد أقصى).
+4. إذا كان السياق لا يحتوي على إجابة، قل فقط: "لا أملك معلومات كافية للإجابة من البيانات المتاحة."
+5. التزم بلهجة ولغة السياق (عربي/إنجليزي).
 """
 
 # ==========================================
@@ -586,7 +591,7 @@ def build_prompt(query, context):
 # ==========================================
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
+    model="gemini-flash-latest",
     google_api_key=GOOGLE_API_KEY,
     temperature=0.3
 )
@@ -680,13 +685,26 @@ def generate_answer(query, top_k=5):
             prompt
         )
 
+        # Ensure response.content is a string
+        res_content = response.content
+        if isinstance(res_content, list):
+            text_parts = []
+            for part in res_content:
+                if isinstance(part, dict) and 'text' in part:
+                    text_parts.append(part['text'])
+                elif isinstance(part, str):
+                    text_parts.append(part)
+            res_content = " ".join(text_parts)
+        elif not isinstance(res_content, str):
+            res_content = str(res_content)
+
         return {
             "query": query,
-            "response": response.content,
+            "response": res_content,
             "retrieved_chunks": retrieved_chunks,
             "context": context,
             "status": "success",
-            "model_used": "gemini-2.0-flash"
+            "model_used": "gemini-flash-latest"
         }
 
     except Exception as gemini_error:
@@ -701,13 +719,26 @@ def generate_answer(query, top_k=5):
                 prompt
             )
 
+            # Ensure response.content is a string
+            res_content = response.content
+            if isinstance(res_content, list):
+                text_parts = []
+                for part in res_content:
+                    if isinstance(part, dict) and 'text' in part:
+                        text_parts.append(part['text'])
+                    elif isinstance(part, str):
+                        text_parts.append(part)
+                res_content = " ".join(text_parts)
+            elif not isinstance(res_content, str):
+                res_content = str(res_content)
+
             return {
                 "query": query,
-                "response": response.content,
+                "response": res_content,
                 "retrieved_chunks": retrieved_chunks,
                 "context": context,
                 "status": "success",
-                "model_used": "llama-3.3-70b-versatile"
+                "model_used": "allam-2-7b"
             }
 
         except Exception as groq_error:
@@ -854,18 +885,37 @@ def rag_chat_runnable(inputs):
     try:
         if model_choice == "groq":
             response = call_llm_with_retry(groq_llm, messages)
-            model_used = "llama-3.3-70b-versatile"
+            model_used = "allam-2-7b"
         else:
             response = call_llm_with_retry(llm, messages)
-            model_used = "gemini-2.0-flash"
-    except Exception:
+            model_used = "gemini-flash-latest"
+    except Exception as primary_error:
+        # Check if fallback is disabled (e.g., during evaluation)
+        if inputs.get("disable_fallback", False):
+            raise primary_error
+
         # Emergency Fallback Switch if Primary API goes down
+        print(f"⚠️ Primary model {model_choice} failed. Attempting fallback...")
         fallback_target = llm if model_choice == "groq" else groq_llm
-        model_used = "gemini-2.0-flash" if model_choice == "groq" else "llama-3.3-70b-versatile"
+        model_used = "gemini-flash-latest" if model_choice == "groq" else "allam-2-7b"
         response = fallback_target.invoke(messages)
 
+    # Ensure response.content is a string
+    res_content = response.content
+    if isinstance(res_content, list):
+        # Extract text from rich response format if necessary
+        text_parts = []
+        for part in res_content:
+            if isinstance(part, dict) and 'text' in part:
+                text_parts.append(part['text'])
+            elif isinstance(part, str):
+                text_parts.append(part)
+        res_content = " ".join(text_parts)
+    elif not isinstance(res_content, str):
+        res_content = str(res_content)
+
     return {
-        "response": response.content,
+        "response": res_content,
         "model_used": model_used,
         "status": "success",
         "context": context,
@@ -888,6 +938,8 @@ chat_chain_with_history = RunnableWithMessageHistory(
 # EXPOSURE WRAPPER FUNCTION
 # ==========================================
 
+import time
+
 def chat_with_memory(
     query, 
     top_k=5, 
@@ -895,11 +947,13 @@ def chat_with_memory(
     memory_strategy="sliding_window", 
     model_choice="gemini", 
     prompt_style="system_guided_ar", 
-    session_id="default"
+    session_id="default",
+    disable_fallback=False
 ):
     """
     Main wrapper function interface used directly by evaluate.py and streamlit_app.py
     """
+    start_time = time.time()
     try:
         # Invoke via LangChain's native manager interface
         output = chat_chain_with_history.invoke(
@@ -909,7 +963,8 @@ def chat_with_memory(
                 "max_turns": max_turns,
                 "memory_strategy": memory_strategy,
                 "model_choice": model_choice,
-                "prompt_style": prompt_style
+                "prompt_style": prompt_style,
+                "disable_fallback": disable_fallback
             },
             config={
                 "configurable": {
@@ -918,22 +973,36 @@ def chat_with_memory(
             }
         )
 
+        latency = time.time() - start_time
+        
+        # Simple token estimation (4 chars per token)
+        est_tokens = (len(output.get("response", "")) // 4) + (len(output.get("context", "")) // 4)
+
         return {
             "query": query,
             "response": output["response"],
             "retrieved_chunks": output.get("retrieved_chunks", []),
             "context": output.get("context", ""),
             "status": output.get("status", "success"),
-            "model_used": output.get("model_used")
+            "model_used": output.get("model_used"),
+            "latency": latency,
+            "estimated_tokens": est_tokens
         }
 
     except Exception as e:
+        latency = time.time() - start_time
+        print(f"\n🚨 [CRITICAL PIPELINE ERROR]: {e}\n")
         return {
             "query": query,
-            "response": "حدث خطأ أثناء معالجة الطلب. يرجى المحاولة لاحقًا.",
+            "response": f"حدث خطأ أثناء معالجة الطلب: {str(e)}",
             "retrieved_chunks": [],
             "context": "",
             "status": "error",
             "model_used": None,
-            "error_message": str(e)
+            "error_message": str(e),
+            "latency": latency,
+            "estimated_tokens": 0
+        }
+ency": latency,
+            "estimated_tokens": 0
         }
