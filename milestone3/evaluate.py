@@ -41,6 +41,7 @@ def load_test_data(file_path, start=0, limit=3):
 # ==========================================
 
 import re
+from rouge_score import rouge_scorer
 
 def normalize_for_metric(text):
     """Normalize text for better metric matching."""
@@ -63,13 +64,13 @@ def calculate_exact_match(predicted, expected):
 def calculate_text_quality(answer):
     """
     CATEGORY: Text Generation Quality
-    Evaluates fluency and syntactic coherence by checking for 
-    error patterns, minimum length, and presence of placeholders.
+    JUSTIFICATION: Measures fluency by detecting rejection stubs and error messages.
+    While a simple failure detector, it serves as a proxy for 'Syntactic Coherence'
+    by ensuring the model doesn't return non-sentences or known failure patterns.
     """
     if not answer or len(answer.strip()) < 5:
         return 0.0
 
-    # Common error or refusal patterns
     failure_patterns = [
         "حدث خطأ",
         "لا أملك معلومات كافية",
@@ -83,7 +84,6 @@ def calculate_text_quality(answer):
         if pattern.lower() in answer.lower():
             return 0.0
 
-    # Basic fluency check: ensure we don't just have one or two words
     if len(answer.split()) < 2:
         return 0.0
 
@@ -93,8 +93,9 @@ def calculate_text_quality(answer):
 def calculate_grounding(answer, context):
     """
     CATEGORY: Grounding to Retrieved Context (Faithfulness)
-    Validates that the generated answer is supported by the 
-    provided context using word overlap as a proxy for faithfulness.
+    JUSTIFICATION: Precision-based word overlap. We check what percentage of 
+    the model's claims (words) can be found in the provided context. 
+    A higher score indicates lower hallucination risk.
     """
     answer = normalize_for_metric(answer)
     context = normalize_for_metric(context)
@@ -105,7 +106,6 @@ def calculate_grounding(answer, context):
     if not answer_words:
         return 0.0
 
-    # Proportion of answer words found in context
     overlap = answer_words.intersection(context_words)
     return len(overlap) / len(answer_words)
 
@@ -113,21 +113,19 @@ def calculate_grounding(answer, context):
 def calculate_semantic_correctness(predicted, expected):
     """
     CATEGORY: Semantic Correctness
-    Measures how accurately the answer addresses the user's intent 
-    compared to the ground-truth expected answer.
+    JUSTIFICATION: Uses ROUGE-L (Longest Common Subsequence) to measure 
+    how well the generated answer captures the sequence and content of 
+    the ground truth answer. ROUGE is a standard NLP metric for RAG evaluation.
     """
     predicted = normalize_for_metric(predicted)
     expected = normalize_for_metric(expected)
     
-    predicted_words = set(predicted.split())
-    expected_words = set(expected.split())
-
-    if not expected_words:
-        return 1.0 # Empty expected is vacuously correct
-
-    # Recall-oriented overlap (how much of 'expected' did we capture?)
-    overlap = predicted_words.intersection(expected_words)
-    return len(overlap) / len(expected_words)
+    if not expected:
+        return 1.0
+        
+    scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=False)
+    scores = scorer.score(expected, predicted)
+    return scores['rougeL'].fmeasure
 
 
 # ==========================================
@@ -139,19 +137,28 @@ def run_evaluation():
 
     # Load questions per file
     try:
-        f35_qas = load_test_data("f35_qa_dataset.json", start=0, limit=3)
-        samurai_qas = load_test_data("samurai_qa_dataset.json", start=0, limit=3)
-        octopus_qas = load_test_data("octopus_qa_dataset.json", start=0, limit=3)
-        citizen_kane_qas = load_test_data("citizen_kane_qa_dataset.json", start=0, limit=3)
+        # Load only 2 questions total (1 from each of 2 files)
+        f35_qas = load_test_data("f35_qa_dataset.json", start=0, limit=1)
+        samurai_qas = load_test_data("samurai_qa_dataset.json", start=0, limit=1)
     except FileNotFoundError as e:
         print(f"❌ Error: QA dataset files not found. {e}")
         return
 
-    test_suite = f35_qas + samurai_qas + octopus_qas + citizen_kane_qas
+    test_suite = f35_qas + samurai_qas
     
+    # Focused Comparative Configurations (Fixing variables to isolate effects)
+    # This reduces 16 combinations to 7 unique ones to save your API resources.
     configurations = [
-        {"prompt_style": "system_guided_ar", "memory_strategy": "sliding_window"},
-        {"prompt_style": "minimal_ar", "memory_strategy": "sliding_window"},
+        # Comparison 1 & 2: Prompt Style & Language (Memory fixed to sliding_window)
+        {"prompt_style": "system_guided_ar", "memory_strategy": "sliding_window", "comp": "Prompt/Lang"},
+        {"prompt_style": "minimal_ar",       "memory_strategy": "sliding_window", "comp": "Prompt/Lang"},
+        {"prompt_style": "system_guided_en", "memory_strategy": "sliding_window", "comp": "Prompt/Lang"},
+        {"prompt_style": "minimal_en",       "memory_strategy": "sliding_window", "comp": "Prompt/Lang"},
+        
+        # Comparison 3: Context Strategies (Prompt fixed to system_guided_ar)
+        {"prompt_style": "system_guided_ar", "memory_strategy": "full_history",      "comp": "Context/Mem"},
+        {"prompt_style": "system_guided_ar", "memory_strategy": "strict_truncation",  "comp": "Context/Mem"},
+        {"prompt_style": "system_guided_ar", "memory_strategy": "summarized_history", "comp": "Context/Mem"},
     ]
 
     models_to_evaluate = ["gemini", "groq"]

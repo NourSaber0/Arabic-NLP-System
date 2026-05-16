@@ -167,7 +167,7 @@ print(
     .reset_index(name="num_lines")
 )
 
-# ==========================================
+# =/=========================================
 # MS3-SAFE TEXT NORMALIZATION
 # ==========================================
 
@@ -181,12 +181,10 @@ Normalization constraints for MS3:
 """
 
 AR_PUNCT_MAP = {
-    ",": "،",
     ";": "؛",
     "?": "؟",
-    "\"": "«",
-    "“": "«",
-    "”": "»"
+    "\u201c": "«",
+    "\u201d": "»"
 }
 
 PUNCT_RE = re.compile(
@@ -204,9 +202,7 @@ def remove_noise_tags(text: str) -> str:
 def normalize_ms3_text(text: str) -> str:
     """
     Applies light normalization suitable for MS3 RAG.
-
-    The goal is to clean formatting while preserving
-    the natural transcript language.
+    Fix Bug 6: Handles straight double-quotes by toggling between opening/closing guillemets.
     """
 
     if not isinstance(text, str):
@@ -215,11 +211,24 @@ def normalize_ms3_text(text: str) -> str:
     # Remove non-speech tags only
     text = remove_noise_tags(text)
 
+    # Fix Bug 6: Stateful toggle for straight quotes
+    # Replace " with « (opening) and » (closing) alternatively
+    parts = text.split('"')
+    new_text = ""
+    for i, part in enumerate(parts):
+        new_text += part
+        if i < len(parts) - 1:
+            new_text += "«" if i % 2 == 0 else "»"
+    text = new_text
+
     # Standardize selected punctuation without removing punctuation
     text = PUNCT_RE.sub(
         lambda m: AR_PUNCT_MAP[m.group(0)],
         text
     )
+
+    # Fix common comma case
+    text = text.replace(",", "،")
 
     # Add spaces between Arabic and English/numeric tokens
     text = re.sub(
@@ -738,7 +747,7 @@ def generate_answer(query, top_k=5):
                 "retrieved_chunks": retrieved_chunks,
                 "context": context,
                 "status": "success",
-                "model_used": "allam-2-7b"
+                "model_used": "llama-3.3-70b-versatile"
             }
 
         except Exception as groq_error:
@@ -787,10 +796,42 @@ print("LangChain RAG chain initialized successfully.")
 
 
 # ==========================================
+# SUMMARIZATION HELPER (Fix Bug 5)
+# ==========================================
+
+def summarize_history(history, llm_model):
+    """
+    Calls the LLM to compress conversation history into a single summary paragraph.
+    """
+    if not history:
+        return "لا يوجد تاريخ محادثة سابقة."
+    
+    # Convert LangChain messages to a simple string for the summarizer
+    history_str = ""
+    for msg in history:
+        role = "المستخدم" if isinstance(msg, HumanMessage) else "المساعد"
+        history_str += f"{role}: {msg.content}\n"
+
+    summary_prompt = f"""
+قم بتلخيص المحادثة التالية في فقرة واحدة موجزة جداً باللغة العربية، مع الحفاظ على أهم النقاط والمعلومات التي تم ذكرها:
+
+{history_str}
+
+الملخص الموجز:
+"""
+    try:
+        response = llm_model.invoke([HumanMessage(content=summary_prompt)])
+        return response.content
+    except Exception as e:
+        print(f"Error in summarization: {e}")
+        return "تم مناقشة مواضيع سابقة تتعلق بالحلقات."
+
+
+# ==========================================
 # CONTEXT WINDOW STRATEGIES (Updated for LangChain Messages)
 # ==========================================
 
-def get_context_window(history, strategy="sliding_window", max_turns=3):
+def get_context_window(history, strategy="sliding_window", max_turns=3, llm_model=None):
     """
     Truncates or summarizes LangChain BaseMessage objects 
     to fit within specified memory requirements.
@@ -817,11 +858,17 @@ def get_context_window(history, strategy="sliding_window", max_turns=3):
         msg_limit = max_turns * 2
         if len(history) <= msg_limit:
             return history
-        # Add a placeholder System Message to inject context summary
+        
+        # Call the LLM to summarize the OLDER history
+        older_history = history[:-msg_limit]
+        recent_history = history[-msg_limit:]
+        
+        summary_text = summarize_history(older_history, llm_model)
+        
         summary_msg = SystemMessage(
-            content="ملخص المحادثة السابقة: تم مناقشة الأسئلة السابقة المطروحة من المستخدم وتوفير الإجابات المناسبة لها بناءً على المستندات."
+            content=f"ملخص المحادثة السابقة: {summary_text}"
         )
-        return [summary_msg] + history[-(msg_limit - 1):]
+        return [summary_msg] + recent_history
 
     return history[-(max_turns * 2):]
 
@@ -864,19 +911,23 @@ def rag_chat_runnable(inputs):
 
     context = build_context(retrieved_chunks)
 
-    # 2. Prompt Engineering Experiments Registry (Fulfills Section 2.6)
+    # 2. Prompt Engineering Experiments Registry (Fix Bug 3)
+    # Removed literal {context} to prevent duplicate/literal injection
     prompts_registry = {
         "system_guided_ar": SYSTEM_PROMPT,
-        "minimal_ar": "أجب عن السؤال التالي باستخدام السياق المرفق فقط:\n{context}",
-        "system_guided_en": "You are an intelligent assistant answering questions strictly based on the retrieved context.\nContext:\n{context}",
-        "minimal_en": "Answer using this context only:\n{context}"
+        "minimal_ar": "أجب عن السؤال التالي باستخدام السياق المرفق فقط:",
+        "system_guided_en": "You are an intelligent assistant answering questions strictly based on the retrieved context.",
+        "minimal_en": "Answer using this context only:"
     }
     
     active_sys_base = prompts_registry.get(prompt_style, SYSTEM_PROMPT)
     system_prompt_message = SystemMessage(content=f"{active_sys_base}\n\nالسياق:\n{context}")
 
+    # Set up LLM reference for summarization
+    active_llm = groq_llm if model_choice == "groq" else llm
+
     # 3. Process active history window using selected strategy
-    processed_history = get_context_window(raw_history, strategy=strategy, max_turns=max_turns)
+    processed_history = get_context_window(raw_history, strategy=strategy, max_turns=max_turns, llm_model=active_llm)
 
     # 4. Compile message history trace
     messages = [system_prompt_message] + processed_history + [HumanMessage(content=query)]
@@ -885,7 +936,7 @@ def rag_chat_runnable(inputs):
     try:
         if model_choice == "groq":
             response = call_llm_with_retry(groq_llm, messages)
-            model_used = "allam-2-7b"
+            model_used = "llama-3.3-70b-versatile"
         else:
             response = call_llm_with_retry(llm, messages)
             model_used = "gemini-flash-latest"
@@ -897,7 +948,7 @@ def rag_chat_runnable(inputs):
         # Emergency Fallback Switch if Primary API goes down
         print(f"⚠️ Primary model {model_choice} failed. Attempting fallback...")
         fallback_target = llm if model_choice == "groq" else groq_llm
-        model_used = "gemini-flash-latest" if model_choice == "groq" else "allam-2-7b"
+        model_used = "gemini-flash-latest" if model_choice == "groq" else "llama-3.3-70b-versatile"
         response = fallback_target.invoke(messages)
 
     # Ensure response.content is a string
@@ -1001,8 +1052,7 @@ def chat_with_memory(
             "model_used": None,
             "error_message": str(e),
             "latency": latency,
-            "estimated_tokens": 0
-        }
-ency": latency,
+            "error_message": str(e),
+            "latency": latency,
             "estimated_tokens": 0
         }
