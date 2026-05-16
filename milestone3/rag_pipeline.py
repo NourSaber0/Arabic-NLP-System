@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
-
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 import pandas as pd
 import numpy as np
@@ -16,6 +16,7 @@ import faiss
 import json
 import re
 import os
+
 
 # ==========================================
 # PROJECT PATHS
@@ -411,8 +412,8 @@ def keyword_score(query_terms, text):
 def retrieve_chunks(
     query,
     top_k=5,
-    fetch_k=60,
-    min_score=0.25,
+    fetch_k=80,
+    min_score=0.15,
     episode_filter=None
 ):
     """
@@ -452,11 +453,19 @@ def retrieve_chunks(
             row["chunk_text"]
         )
 
+        exact_phrase_boost = 0.0
+
+        for term in query_terms:
+            if term in row["chunk_text"].lower():
+                exact_phrase_boost += 0.05
+
+        exact_phrase_boost = min(exact_phrase_boost, 0.20)
+
         final_score = (
-            0.70 * float(semantic_score)
+            0.55 * float(semantic_score)
         ) + (
-            0.30 * k_score
-        )
+            0.45 * k_score
+        ) + exact_phrase_boost
 
         results.append({
             "semantic_score": float(semantic_score),
@@ -792,29 +801,22 @@ def get_context_window(history, strategy="sliding_window", max_turns=3):
 
 conversation_history = []
 
-def format_chat_history(
-    history,
-    max_turns=3,
-    strategy="sliding_window"
-):
-    """
-    Formats chat history according to the selected context window strategy.
-    """
-
+def format_chat_history(history, max_turns=3, strategy="sliding_window"):
     selected_history = get_context_window(
         history,
         strategy=strategy,
-        max_turns=max_turns
+        max_turns=max_turns * 2
     )
 
     formatted_history = []
 
-    for turn in selected_history:
-        formatted_history.append(
-            f"User: {turn['user']}\nAssistant: {turn['assistant']}"
-        )
+    for message in selected_history:
+        if isinstance(message, HumanMessage):
+            formatted_history.append(f"User: {message.content}")
+        elif isinstance(message, AIMessage):
+            formatted_history.append(f"Assistant: {message.content}")
 
-    return "\n\n".join(formatted_history)
+    return "\n".join(formatted_history)
 
 
 def build_chat_prompt(query, context, chat_history):
@@ -853,11 +855,14 @@ def chat_with_memory(query, top_k=5, max_turns=3, memory_strategy="sliding_windo
     retrieval_query = query
 
     if conversation_history:
-        last_user_query = conversation_history[-1]["user"]
+        last_user_query = ""
 
-        retrieval_query = (
-            last_user_query + " " + query
-        )
+        for message in reversed(conversation_history):
+            if isinstance(message, HumanMessage):
+                last_user_query = message.content
+                break
+
+        retrieval_query = last_user_query + " " + query
 
     retrieved_chunks = retrieve_chunks(
         retrieval_query,
@@ -933,10 +938,8 @@ def chat_with_memory(query, top_k=5, max_turns=3, memory_strategy="sliding_windo
 
     answer = response.content
 
-    conversation_history.append({
-        "user": query,
-        "assistant": answer
-    })
+    conversation_history.append(HumanMessage(content=query))
+    conversation_history.append(AIMessage(content=answer))
 
     return {
         "query": query,

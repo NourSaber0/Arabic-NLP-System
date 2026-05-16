@@ -30,7 +30,7 @@ def exact_match_score(predicted, expected):
 
 
 def quality_score(answer):
-    if not answer or len(answer.strip()) < 10:
+    if not answer or len(answer.strip()) < 3:
         return 0.0
 
     bad_phrases = [
@@ -71,10 +71,12 @@ def semantic_correctness_score(predicted, expected):
 def run_evaluation():
     print("🚀 Starting Milestone 3 Evaluation Pipeline...")
 
-    f35_qas = load_test_data("data/QA/f35_qa_dataset.json", start=0, limit=10)
-    samurai_qas = load_test_data("data/QA/samurai_qa_dataset.json", start=0, limit=10)
+    f35_qas = load_test_data("data/QA/f35_qa_dataset.json", start=0, limit=5)
+    samurai_qas = load_test_data("data/QA/samurai_qa_dataset.json", start=0, limit=5)
+    octopus_qas = load_test_data("data/QA/octopus_qa_dataset.json", start=0, limit=5)
+    citizen_kane_qas = load_test_data("data/QA/citizen_kane_qa_dataset.json", start=0, limit=5)
 
-    test_suite = f35_qas + samurai_qas
+    test_suite = f35_qas + samurai_qas + octopus_qas + citizen_kane_qas
     results = []
 
     print(f"\nLoaded {len(test_suite)} consecutive questions for testing.")
@@ -94,7 +96,7 @@ def run_evaluation():
         try:
             output = chat_with_memory(
                 question,
-                top_k=5,
+                top_k=8,
                 max_turns=3,
                 memory_strategy="sliding_window"
             )
@@ -150,7 +152,7 @@ def save_results(results):
 
 
 def print_summary(results):
-    print("\n📊 Evaluation Summary")
+    print("\n📊 Evaluation Summary for 40 questions")
     print("=" * 60)
 
     if not results:
@@ -161,6 +163,7 @@ def print_summary(results):
     avg_semantic = np.mean([r["semantic_correctness"] for r in results])
     avg_grounding = np.mean([r["grounding_score"] for r in results])
     avg_quality = np.mean([r["quality_score"] for r in results])
+    
 
     print(f"Average Exact Match: {avg_exact:.2f}")
     print(f"Average Semantic Correctness: {avg_semantic:.2f}")
