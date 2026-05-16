@@ -9,6 +9,9 @@ from sentence_transformers import SentenceTransformer
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.chat_history import InMemoryChatMessageHistory
+from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.runnables import RunnableLambda
 
 import pandas as pd
 import numpy as np
@@ -753,200 +756,184 @@ print("LangChain RAG chain initialized successfully.")
 
 
 # ==========================================
-# CONTEXT WINDOW STRATEGIES
+# CONTEXT WINDOW STRATEGIES (Updated for LangChain Messages)
 # ==========================================
 
 def get_context_window(history, strategy="sliding_window", max_turns=3):
     """
-    Returns conversation history using different context window strategies.
-
-    Strategies:
-    - full_history: use all previous turns
-    - sliding_window: use last N turns
-    - strict_truncation: keep first turn + last N-1 turns
-    - summarized_history: use a simple summary placeholder + recent turns
+    Truncates or summarizes LangChain BaseMessage objects 
+    to fit within specified memory requirements.
     """
+    if not history:
+        return []
 
     if strategy == "full_history":
-        selected_history = history
+        return history
 
     elif strategy == "sliding_window":
-        selected_history = history[-max_turns:]
+        # Each turn has 1 HumanMessage and 1 AIMessage (2 messages per turn)
+        msg_limit = max_turns * 2
+        return history[-msg_limit:]
 
     elif strategy == "strict_truncation":
-        if len(history) <= max_turns:
-            selected_history = history
-        else:
-            selected_history = [history[0]] + history[-(max_turns - 1):]
+        msg_limit = max_turns * 2
+        if len(history) <= msg_limit:
+            return history
+        # Preserve the very first Q&A turn, then grab the most recent turns
+        return [history[0], history[1]] + history[-(msg_limit - 2):]
 
     elif strategy == "summarized_history":
-        if len(history) <= max_turns:
-            selected_history = history
-        else:
-            summary_turn = {
-                "user": "Conversation summary",
-                "assistant": "Previous conversation discussed earlier user questions and assistant answers."
-            }
-            selected_history = [summary_turn] + history[-(max_turns - 1):]
+        msg_limit = max_turns * 2
+        if len(history) <= msg_limit:
+            return history
+        # Add a placeholder System Message to inject context summary
+        summary_msg = SystemMessage(
+            content="ملخص المحادثة السابقة: تم مناقشة الأسئلة السابقة المطروحة من المستخدم وتوفير الإجابات المناسبة لها بناءً على المستندات."
+        )
+        return [summary_msg] + history[-(msg_limit - 1):]
 
-    else:
-        selected_history = history[-max_turns:]
-
-    return selected_history
+    return history[-(max_turns * 2):]
 
 
 # ==========================================
-# MULTI-TURN CHAT MEMORY
+# MULTI-TURN CHAT MEMORY & RUNNABLE ARCHITECTURE
 # ==========================================
 
-conversation_history = []
+store = {}
 
-def format_chat_history(history, max_turns=3, strategy="sliding_window"):
-    selected_history = get_context_window(
-        history,
-        strategy=strategy,
-        max_turns=max_turns * 2
-    )
-
-    formatted_history = []
-
-    for message in selected_history:
-        if isinstance(message, HumanMessage):
-            formatted_history.append(f"User: {message.content}")
-        elif isinstance(message, AIMessage):
-            formatted_history.append(f"Assistant: {message.content}")
-
-    return "\n".join(formatted_history)
+def get_session_history(session_id: str):
+    if session_id not in store:
+        store[session_id] = InMemoryChatMessageHistory()
+    return store[session_id]
 
 
-def build_chat_prompt(query, context, chat_history):
+def rag_chat_runnable(inputs):
     """
-    Builds a multi-turn prompt using retrieved context
-    plus recent conversation history.
+    Core runnable unit that processes inputs, applies context strategies, 
+    and handles model invocation with fallback execution logs.
     """
+    query = inputs["question"]
+    raw_history = inputs.get("history", [])
+    
+    # Extract structural experiment configurations passed through execution config
+    strategy = inputs.get("memory_strategy", "sliding_window")
+    max_turns = inputs.get("max_turns", 3)
+    prompt_style = inputs.get("prompt_style", "system_guided_ar")
+    model_choice = inputs.get("model_choice", "gemini")
 
-    prompt = f"""
-{SYSTEM_PROMPT}
-
-سجل المحادثة السابق:
-{chat_history}
-
-السياق المسترجع:
-{context}
-
-السؤال الحالي:
-{query}
-
-الإجابة:
-"""
-
-    return prompt
-
-
-def chat_with_memory(query, top_k=5, max_turns=3, memory_strategy="sliding_window"):
-    """
-    Multi-turn RAG chatbot with configurable memory strategies.
-    """
-
-    # ==========================================
-    # HISTORY-AWARE RETRIEVAL QUERY
-    # ==========================================
-
-    retrieval_query = query
-
-    if conversation_history:
-        last_user_query = ""
-
-        for message in reversed(conversation_history):
-            if isinstance(message, HumanMessage):
-                last_user_query = message.content
-                break
-
-        retrieval_query = last_user_query + " " + query
-
-    retrieved_chunks = retrieve_chunks(
-        retrieval_query,
-        top_k=top_k
-    )
-
-    # ==========================================
-    # OUT-OF-DOMAIN CHECK
-    # ==========================================
-
+    # 1. Candidate Retrieval
+    retrieved_chunks = retrieve_chunks(query, top_k=inputs.get("top_k", 5))
     if is_out_of_domain(retrieved_chunks):
-
         return {
-            "query": query,
-            "response": (
-                "لا أملك معلومات كافية للإجابة من البيانات المتاحة.\n"
-                "I do not have enough information to answer from the available data."
-            ),
-            "retrieved_chunks": retrieved_chunks,
-            "context": "",
-            "chat_history": "",
+            "response": "لا أملك معلومات كافية للإجابة من البيانات المتاحة.",
+            "model_used": None,
             "status": "out_of_domain",
-            "model_used": None
+            "context": ""
         }
 
     context = build_context(retrieved_chunks)
 
-    chat_history = format_chat_history(
-        conversation_history,
-        max_turns=max_turns,
-        strategy=memory_strategy
-    )
+    # 2. Prompt Engineering Experiments Registry (Fulfills Section 2.6)
+    prompts_registry = {
+        "system_guided_ar": SYSTEM_PROMPT,
+        "minimal_ar": "أجب عن السؤال التالي باستخدام السياق المرفق فقط:\n{context}",
+        "system_guided_en": "You are an intelligent assistant answering questions strictly based on the retrieved context.\nContext:\n{context}",
+        "minimal_en": "Answer using this context only:\n{context}"
+    }
+    
+    active_sys_base = prompts_registry.get(prompt_style, SYSTEM_PROMPT)
+    system_prompt_message = SystemMessage(content=f"{active_sys_base}\n\nالسياق:\n{context}")
 
-    prompt = build_chat_prompt(
-        query,
-        context,
-        chat_history
-    )
+    # 3. Process active history window using selected strategy
+    processed_history = get_context_window(raw_history, strategy=strategy, max_turns=max_turns)
 
-    # ==========================================
-    # TRY GEMINI → GROQ 
-    # ==========================================
+    # 4. Compile message history trace
+    messages = [system_prompt_message] + processed_history + [HumanMessage(content=query)]
 
+    # 5. Model Execution with Fallback Logic (Fulfills Section 2.8)
     try:
-        response = call_llm_with_retry(
-            llm,
-            prompt
-        )
-        model_used = "gemini-2.0-flash"
-
-    except Exception:
-
-        try:
-            response = call_llm_with_retry(
-                groq_llm,
-                prompt
-            )
+        if model_choice == "groq":
+            response = call_llm_with_retry(groq_llm, messages)
             model_used = "llama-3.3-70b-versatile"
-
-        except Exception:
-            return {
-                "query": query,
-                "response": (
-                    "حدث خطأ أثناء استدعاء نماذج اللغة. "
-                    "يرجى المحاولة لاحقًا."
-                ),
-                "retrieved_chunks": retrieved_chunks,
-                "context": context,
-                "chat_history": chat_history,
-                "status": "error",
-                "model_used": None
-            }
-
-    answer = response.content
-
-    conversation_history.append(HumanMessage(content=query))
-    conversation_history.append(AIMessage(content=answer))
+        else:
+            response = call_llm_with_retry(llm, messages)
+            model_used = "gemini-2.0-flash"
+    except Exception:
+        # Emergency Fallback Switch if Primary API goes down
+        fallback_target = llm if model_choice == "groq" else groq_llm
+        model_used = "gemini-2.0-flash" if model_choice == "groq" else "llama-3.3-70b-versatile"
+        response = fallback_target.invoke(messages)
 
     return {
-        "query": query,
-        "response": answer,
-        "retrieved_chunks": retrieved_chunks,
-        "context": context,
-        "chat_history": chat_history,
+        "response": response.content,
+        "model_used": model_used,
         "status": "success",
-        "model_used": model_used
+        "context": context,
+        "retrieved_chunks": retrieved_chunks
     }
+
+
+base_chat_chain = RunnableLambda(rag_chat_runnable)
+
+chat_chain_with_history = RunnableWithMessageHistory(
+    base_chat_chain,
+    get_session_history,
+    input_messages_key="question",
+    history_messages_key="history",
+    output_messages_key="response" # Updates history store with the clean string inner token
+)
+
+
+# ==========================================
+# EXPOSURE WRAPPER FUNCTION
+# ==========================================
+
+def chat_with_memory(
+    query, 
+    top_k=5, 
+    max_turns=3, 
+    memory_strategy="sliding_window", 
+    model_choice="gemini", 
+    prompt_style="system_guided_ar", 
+    session_id="default"
+):
+    """
+    Main wrapper function interface used directly by evaluate.py and streamlit_app.py
+    """
+    try:
+        # Invoke via LangChain's native manager interface
+        output = chat_chain_with_history.invoke(
+            {
+                "question": query,
+                "top_k": top_k,
+                "max_turns": max_turns,
+                "memory_strategy": memory_strategy,
+                "model_choice": model_choice,
+                "prompt_style": prompt_style
+            },
+            config={
+                "configurable": {
+                    "session_id": session_id
+                }
+            }
+        )
+
+        return {
+            "query": query,
+            "response": output["response"],
+            "retrieved_chunks": output.get("retrieved_chunks", []),
+            "context": output.get("context", ""),
+            "status": output.get("status", "success"),
+            "model_used": output.get("model_used")
+        }
+
+    except Exception as e:
+        return {
+            "query": query,
+            "response": "حدث خطأ أثناء معالجة الطلب. يرجى المحاولة لاحقًا.",
+            "retrieved_chunks": [],
+            "context": "",
+            "status": "error",
+            "model_used": None,
+            "error_message": str(e)
+        }
