@@ -612,7 +612,7 @@ print("Gemini model initialized successfully.")
 # ==========================================
 
 groq_llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
+    model="allam-2-7b",
     groq_api_key=GROQ_API_KEY,
     temperature=0.3
 )
@@ -747,7 +747,7 @@ def generate_answer(query, top_k=5):
                 "retrieved_chunks": retrieved_chunks,
                 "context": context,
                 "status": "success",
-                "model_used": "llama-3.3-70b-versatile"
+                "model_used": "allam-2-7b"
             }
 
         except Exception as groq_error:
@@ -936,7 +936,7 @@ def rag_chat_runnable(inputs):
     try:
         if model_choice == "groq":
             response = call_llm_with_retry(groq_llm, messages)
-            model_used = "llama-3.3-70b-versatile"
+            model_used = "allam-2-7b"
         else:
             response = call_llm_with_retry(llm, messages)
             model_used = "gemini-flash-latest"
@@ -948,7 +948,7 @@ def rag_chat_runnable(inputs):
         # Emergency Fallback Switch if Primary API goes down
         print(f"⚠️ Primary model {model_choice} failed. Attempting fallback...")
         fallback_target = llm if model_choice == "groq" else groq_llm
-        model_used = "gemini-flash-latest" if model_choice == "groq" else "llama-3.3-70b-versatile"
+        model_used = "gemini-flash-latest" if model_choice == "groq" else "allam-2-7b"
         response = fallback_target.invoke(messages)
 
     # Ensure response.content is a string
