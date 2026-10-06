@@ -1,4 +1,4 @@
-# Arabic NLP System: RAG Chatbot 🗣️🇸🇦
+# Arabic NLP System: RAG Chatbot 🗣️
 
 Welcome to the **Arabic NLP System** repository! This project implements a **Multi-Turn Retrieval-Augmented Generation (RAG) Chatbot** designed to answer questions strictly based on retrieved context from Arabic podcast and audio transcripts. 
 
